@@ -1,0 +1,15 @@
+{
+  "name": "atomictx",
+  "version": "1.0.0",
+  "description": "Protocol for atomic cross-chain transactions.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "AlecSchaefer",
+  "license": "ISC",
+  "dependencies": {
+    "ganache-cli": "^6.4.1",
+    "truffle": "^5.0.8"
+  }
+}
