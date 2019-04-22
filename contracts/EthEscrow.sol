@@ -1,4 +1,5 @@
 pragma solidity ^0.5.0;
+pragma experimental ABIEncoderV2;
 
 import "openzeppelin-solidity/contracts/math/SafeMath.sol";
 
@@ -18,120 +19,138 @@ contract EthEscrow {
     Signature sig;
   }
 
-  struct SignedSecret {
-    uint256 secret;
-    Signature[] sigs;
-  }
+  uint256 public _startTime;
+  uint256 public _lastTimeOut;
+  uint256 public _delta;
+  uint256 public _delay;
 
-  struct HashLock {
-    bytes32 hashedSecret;
-    bool unlocked;
-  }
-
-  struct Path {
-    uint256 index;
-    uint256 timeOut;
-    uint256 hashLockIndex;
-  }
-
-  HashLock[] public _hashLocks;
-
-  bytes32[] public _hashedPaths;
-  mapping(bytes32 => Path) public _paths;
-
-  SignedSecret[] public _publishedSecrets;
-
-  TxComponent[] public _txComponents;
-
+  address[] public _participants;
   mapping(address => uint256) public _balances;
   mapping(address => uint256) public _shadowBalances;
 
+  TxComponent[] public _tx;
+
+  bytes32[] public _secrets;
+  // Maps secrets to lists of Signatures.
+  mapping(bytes32 => Signature[]) public _signatures;
+  // Maps hashed paths to hashed secrets (hashLocks).
+  mapping(bytes32 => bytes32) public _hashLocks;
+
   constructor(
-    Path[] calldata paths,
-    bytes32[] calldata hashedPaths
-  ) external payable {
+    uint256 delta,
+    uint256 delay,
+    bytes32[] memory paths,
+    bytes32[] memory hashLocks,
+    address[] memory participants
+  ) public payable {
     require(msg.value > 0);
+    require(paths.length == hashLocks.length);
+
+    //add check to number of participants / array length??
 
     _balances[msg.sender] = msg.value;
     _shadowBalances[msg.sender] = msg.value;
 
     for (uint256 i = 0; i < paths.length; i++) {
-      _hashedPaths[paths[i].index] = hashedPaths[paths[i].index];
-      _paths[hashedPaths[paths[i].index]] = paths[i];
+      _hashLocks[paths[i]] = hashLocks[i];
     }
+
+    for (uint256 i = 0; i < participants.length; i++) {
+      _participants[i] = participants[i];
+    }
+
+    _startTime = now;
+    _lastTimeOut = now.add(delay).add(delta.mul(participants.length.add(1)));
+    _delta = delta;
+    _delay = delay;
 
   }
 
-  function withdraw() external {
-    require(_balances[msg.sender] > 0);
+  modifier txConfirmed() {
+    require(
+      _secrets.length == _participants.length || now > _lastTimeOut
+    );
+    _;
+  }
 
-    uint256 numLocks = _hashLocks.length;
-    for (uint256 i = 0; i < numLocks; i++) {
-      require(_hashLocks[i].unlocked);
-    }
+  function withdraw() txConfirmed() external {
+    require(_balances[msg.sender] > 0);
 
     msg.sender.transfer(_balances[msg.sender]);
     delete(_balances[msg.sender]);
   }
 
-  function publishTxComponents(TxComponent[] calldata txComponents) external { // Size limit on parameters?
-    TxComponent memory txc;
-    bytes memory data;
+  function publishTxComponents(TxComponent[] memory txcs) public {
+    bytes32 data;
     string memory err;
-    for (uint256 i = _txComponents.length; i < txComponents.length; i++) { // Appends to _txComponents
-      txc = txComponents[i]; // For readability.
+    Signature memory prevSig;
+    TxComponent memory txc;
+    uint256 startLoop = _tx.length;
+    uint256 endLoop = startLoop + txcs.length;
+    for (uint256 i = startLoop; i < endLoop; i++) { // Appends to _tx
+      txc = txcs[i]; // For readability.
       // Save log of txcs to storage. Log will persist if no iteration of this loop reverts.
-      _txComponents.push(txc);
-      if (i == 0) { // origin txc. msg does not contain backpointer.
-        data = abi.encodePacked(txc.sender, txc.receiver, txc.amount);
+      _tx.push(txc);
+      if (i == 0) { // Origin txc — data does not contain prevSig backpointer.
+        data = keccak256(abi.encodePacked(
+          txc.sender, txc.receiver, txc.amount
+        ));
         err = 'invalid signature: origin txc';
       } else { // derivative txc. msg contains backpointer.
-        data = abi.encodePacked(
-          _txComponents[i-1], txc.sender, txc.receiver, txc.amount
-        );
+        prevSig = _tx[i-1].sig;
+        data = keccak256(abi.encodePacked(
+          prevSig.v, prevSig.r, prevSig.s, txc.sender, txc.receiver, txc.amount
+        ));
         err = 'invalid signature: derivative txc';
       }
-      // Validate signature
-      require(
-        txc.sender == ecrecover(data, txc.sig.v, txc.sig.r, txc.sig.s), err
-      );
+      // Validate signature.
+      require(txcs[i].sender == ecrecover(data, txc.sig.v, txc.sig.r, txc.sig.s), err);
       // Save tentative state. Checks balances are enough to cover each txc (with SafeMath).
       _shadowBalances[txc.sender] = _shadowBalances[txc.sender].sub(txc.amount);
       _shadowBalances[txc.receiver] = _shadowBalances[txc.receiver].add(txc.amount);
     }
   }
 
-  function publishSecret(uint256 secret, Signature[] calldata sigs) external {
+  function publishSecret(Signature[] memory sigs, bytes32 secret) public {
+    require(calculateTimeOut(sigs.length) > now);
 
-    SignedSecret memory ss; // Or can we just pass this directly in as parameter?
-    ss.secret = secret;
+    require(_signatures[secret].length == 0); //require that secret has not already been published.
 
     // Get path.
-    address[] memory addressPath = new address[](sigs.length);
+    bytes32 data; // The data that is signed to create the given signature.
+    bytes32 path;
+    address vertex;
     for (uint256 i = 0; i < sigs.length; i++) {
-      ss.sigs[i] = sigs[i];
-      if (i == 0) { // original reveal. Should be signed by owner of secret.
-        addressPath.push(ecrecover(secret, sigs[i].v, sigs[i].r, sigs[i].s));
-        //ss.secret = secret;
+      if (i == 0) {
+        data = secret;
       } else {
-        addressPath.push(ecrecover(sigs[i-1], sigs[i].v, sigs[i].r, sigs[i].s));
+        data = keccak256(abi.encodePacked(
+          sigs[i-1].v, sigs[i-1].r, sigs[i-1].s
+        ));
       }
+      vertex = ecrecover(data, sigs[i].v, sigs[i].r, sigs[i].s);
+      path = keccak256(abi.encodePacked(vertex, path));
+      _signatures[secret].push(sigs[i]);
     }
 
-    bytes32 hashedPath = keccak256(abi.encodePacked(addressPath));
-    Path memory path = _paths[hashedPath];
+    bytes32 hashLock = _hashLocks[path];
+    require(hashLock != 0);// Confirm path exists / is defined.
+    require(hashLock == keccak256(abi.encodePacked(secret))); // Validate secret
 
-    require(path != 0);
-    require(path.timeOut > now);
+    _secrets.push(secret);
 
-    HashLock storage hashLock = _hashLocks[path.hashLockIndex];
+    if (_secrets.length == _participants.length) {
+      address a;
+      for(uint256 i = 0; i < _participants.length; i++) {
+        a = _participants[i];
+        _balances[a] = _shadowBalances[a];
+        delete(_shadowBalances[a]);
+      }
+    }
+  }
 
-    //require(!hashLock.unlocked);
-    require(hashLock.hashedSecret == keccak256(abi.encodePacked(secret)));
-
-    hashLock.unlocked = true;
-
-    _publishedSecrets.push(ss);
+  function calculateTimeOut(uint256 pathLength) private view returns(uint256) {
+    return _startTime.add(_delay).add(_delta.mul(pathLength.add(1)));
   }
 
 }
