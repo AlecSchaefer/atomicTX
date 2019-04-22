@@ -2,8 +2,9 @@ pragma solidity ^0.5.0;
 pragma experimental ABIEncoderV2;
 
 import "openzeppelin-solidity/contracts/math/SafeMath.sol";
+import "openzeppelin-solidity/contracts/token/ERC721/ERC721.sol";
 
-contract EthEscrow {
+contract ERC721Escrow {
   using SafeMath for uint256;
 
   struct Signature {
@@ -15,7 +16,6 @@ contract EthEscrow {
   struct TxComponent {
     address sender;
     address receiver;
-    uint256 amount;
     Signature sig;
   }
 
@@ -25,8 +25,10 @@ contract EthEscrow {
   uint256 public _delay;
 
   address[] public _participants;
-  mapping(address => uint256) public _balances;
-  mapping(address => uint256) public _shadowBalances;
+  //mapping(address => uint256) public _balances;
+  //mapping(address => uint256) public _shadowBalances;
+  address public _tokenOwner;
+  address public _shadowTokenOwner;
 
   TxComponent[] public _tx;
 
@@ -36,20 +38,31 @@ contract EthEscrow {
   // Maps hashed paths to hashed secrets (hashLocks).
   mapping(bytes32 => bytes32) public _hashLocks;
 
+  ERC721 public _tokenContract;
+  uint256 public _escrowedTokenID;
+
   constructor(
     uint256 delta,
     uint256 delay,
+    address tokenContract,
+    uint256 escrowedTokenID,
     bytes32[] memory paths,
     bytes32[] memory hashLocks,
     address[] memory participants
-  ) public payable {
-    require(msg.value > 0);
+  ) public {
     require(paths.length == hashLocks.length);
 
     //add check to number of participants / array length??
 
-    _balances[msg.sender] = msg.value;
-    _shadowBalances[msg.sender] = msg.value;
+    _tokenContract = ERC721(tokenContract);
+    _escrowedTokenID = escrowedTokenID;
+
+    require(_tokenContract.getApproved(escrowedTokenID) == address(this));
+
+    _tokenContract.transferFrom(msg.sender, address(this), escrowedTokenID); // Add check to make sure this worked ??
+
+    _tokenOwner = msg.sender;
+    _shadowTokenOwner = msg.sender;
 
     for (uint256 i = 0; i < paths.length; i++) {
       _hashLocks[paths[i]] = hashLocks[i];
@@ -74,10 +87,10 @@ contract EthEscrow {
   }
 
   function withdraw() txConfirmed() external {
-    require(_balances[msg.sender] > 0);
-
-    msg.sender.transfer(_balances[msg.sender]);
-    delete(_balances[msg.sender]);
+    _tokenContract.transferFrom(address(this), _tokenOwner, _escrowedTokenID);
+    delete(_tokenOwner);
+    delete(_shadowTokenOwner);
+    delete(_escrowedTokenID);
   }
 
   function publishTxComponents(TxComponent[] memory txcs) public {
@@ -89,25 +102,21 @@ contract EthEscrow {
     uint256 endLoop = startLoop + txcs.length;
     for (uint256 i = startLoop; i < endLoop; i++) { // Appends to _tx
       txc = txcs[i]; // For readability.
+      require(txc.sender == _shadowTokenOwner);
       if (i == 0) { // Origin txc — data does not contain prevSig backpointer.
-        data = keccak256(abi.encodePacked(
-          txc.sender, txc.receiver, txc.amount
-        ));
+        data = keccak256(abi.encodePacked(txc.sender, txc.receiver));
         err = 'invalid signature: origin txc';
       } else { // derivative txc. msg contains backpointer.
         prevSig = _tx[i-1].sig;
         data = keccak256(abi.encodePacked(
-          prevSig.v, prevSig.r, prevSig.s, txc.sender, txc.receiver, txc.amount
+          prevSig.v, prevSig.r, prevSig.s, txc.sender, txc.receiver
         ));
         err = 'invalid signature: derivative txc';
       }
       // Validate signature.
       require(txc.sender == ecrecover(data, txc.sig.v, txc.sig.r, txc.sig.s), err);
-      // Save tentative state. Checks balances are enough to cover each txc (with SafeMath).
-      _shadowBalances[txc.sender] = _shadowBalances[txc.sender].sub(txc.amount);
-      _shadowBalances[txc.receiver] = _shadowBalances[txc.receiver].add(txc.amount);
-      // Save log of txcs to storage.
-      _tx.push(txc);
+      _shadowTokenOwner = txc.receiver;
+      _tx.push(txc);// Save log of txcs to storage.
     }
   }
 
@@ -140,12 +149,7 @@ contract EthEscrow {
     _secrets.push(secret);
 
     if (_secrets.length == _participants.length) {
-      address a;
-      for(uint256 i = 0; i < _participants.length; i++) {
-        a = _participants[i];
-        _balances[a] = _shadowBalances[a];
-        delete(_shadowBalances[a]);
-      }
+      _tokenOwner = _shadowTokenOwner;
     }
   }
 

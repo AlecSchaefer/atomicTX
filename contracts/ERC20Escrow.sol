@@ -2,8 +2,9 @@ pragma solidity ^0.5.0;
 pragma experimental ABIEncoderV2;
 
 import "openzeppelin-solidity/contracts/math/SafeMath.sol";
+import "openzeppelin-solidity/contracts/token/ERC20/ERC20.sol";
 
-contract EthEscrow {
+contract ERC20Escrow {
   using SafeMath for uint256;
 
   struct Signature {
@@ -36,20 +37,33 @@ contract EthEscrow {
   // Maps hashed paths to hashed secrets (hashLocks).
   mapping(bytes32 => bytes32) public _hashLocks;
 
+  ERC20 public _tokenContract;
+  uint256 public _amountEscrowed;
+
   constructor(
     uint256 delta,
     uint256 delay,
+    address tokenContract,
+    uint256 amountEscrowed,
     bytes32[] memory paths,
     bytes32[] memory hashLocks,
     address[] memory participants
-  ) public payable {
-    require(msg.value > 0);
+  ) public {
     require(paths.length == hashLocks.length);
 
     //add check to number of participants / array length??
 
-    _balances[msg.sender] = msg.value;
-    _shadowBalances[msg.sender] = msg.value;
+    _tokenContract = ERC20(tokenContract);
+    _amountEscrowed = amountEscrowed;
+
+    require(
+      _tokenContract.allowance(msg.sender, address(this)) >= amountEscrowed
+    );
+
+    _tokenContract.transferFrom(msg.sender, address(this), amountEscrowed); // Add check to make sure this worked ??
+
+    _balances[msg.sender] = amountEscrowed;
+    _shadowBalances[msg.sender] = amountEscrowed;
 
     for (uint256 i = 0; i < paths.length; i++) {
       _hashLocks[paths[i]] = hashLocks[i];
@@ -74,9 +88,10 @@ contract EthEscrow {
   }
 
   function withdraw() txConfirmed() external {
-    require(_balances[msg.sender] > 0);
-
-    msg.sender.transfer(_balances[msg.sender]);
+    uint256 amount = _balances[msg.sender];
+    require(amount > 0);
+    _tokenContract.transfer(msg.sender, amount);
+    _amountEscrowed = _amountEscrowed.sub(amount);
     delete(_balances[msg.sender]);
   }
 
