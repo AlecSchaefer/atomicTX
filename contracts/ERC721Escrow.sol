@@ -16,6 +16,7 @@ contract ERC721Escrow {
   struct TxComponent {
     address sender;
     address receiver;
+    uint256 tokenID;
     Signature sig;
   }
 
@@ -25,10 +26,11 @@ contract ERC721Escrow {
   uint256 public _delay;
 
   address[] public _participants;
-  //mapping(address => uint256) public _balances;
-  //mapping(address => uint256) public _shadowBalances;
-  address public _tokenOwner;
-  address public _shadowTokenOwner;
+  uint256[] public _tokenIDs;
+
+  mapping(uint256 => address) public _tokenOwners;
+  mapping(uint256 => address) public _shadowTokenOwners;
+  mapping(address => uint256) public _balances;
 
   TxComponent[] public _tx;
 
@@ -39,13 +41,12 @@ contract ERC721Escrow {
   mapping(bytes32 => bytes32) public _hashLocks;
 
   ERC721 public _tokenContract;
-  uint256 public _escrowedTokenID;
 
   constructor(
     uint256 delta,
     uint256 delay,
     address tokenContract,
-    uint256 escrowedTokenID,
+    uint256[] memory tokenIDs,
     bytes32[] memory paths,
     bytes32[] memory hashLocks,
     address[] memory participants
@@ -55,14 +56,15 @@ contract ERC721Escrow {
     //add check to number of participants / array length??
 
     _tokenContract = ERC721(tokenContract);
-    _escrowedTokenID = escrowedTokenID;
 
-    require(_tokenContract.getApproved(escrowedTokenID) == address(this));
-
-    _tokenContract.transferFrom(msg.sender, address(this), escrowedTokenID); // Add check to make sure this worked ??
-
-    _tokenOwner = msg.sender;
-    _shadowTokenOwner = msg.sender;
+    for (uint256 i = 0; i < tokenIDs.length; i++) {
+      require(_tokenContract.getApproved(tokenIDs[i]) == address(this));
+      _tokenContract.transferFrom(msg.sender, address(this), tokenIDs[i]);
+      _tokenOwners[tokenIDs[i]] = msg.sender;
+      _shadowTokenOwners[tokenIDs[i]] = msg.sender;
+      _balances[msg.sender]++;
+      _tokenIDs[i] = tokenIDs[i];
+    }
 
     for (uint256 i = 0; i < paths.length; i++) {
       _hashLocks[paths[i]] = hashLocks[i];
@@ -87,36 +89,47 @@ contract ERC721Escrow {
   }
 
   function withdraw() txConfirmed() external {
-    _tokenContract.transferFrom(address(this), _tokenOwner, _escrowedTokenID);
-    delete(_tokenOwner);
-    delete(_shadowTokenOwner);
-    delete(_escrowedTokenID);
+    require(_balances[msg.sender] > 0);
+    uint256 id;
+    for (uint256 i = 0; i < _tokenIDs.length && _balances[msg.sender] > 0; i++) {
+      id = _tokenIDs[i];
+      if (msg.sender == _tokenOwners[id]) {
+        _tokenContract.transferFrom(address(this), msg.sender, id);
+        delete(_tokenOwners[id]);
+        delete(_shadowTokenOwners[id]);
+        _balances[msg.sender]--:
+        // delete tokenID.
+        _tokenIDs[i] = [_tokenIDs.length - 1];
+        _tokenIDs.length--;
+        i--;
+      }
+    }
   }
 
   function publishTxComponents(TxComponent[] memory txcs) public {
     bytes32 data;
     string memory err;
     Signature memory prevSig;
-    TxComponent memory txc;
+    TxComponent memory t;
     uint256 startLoop = _tx.length;
     uint256 endLoop = startLoop + txcs.length;
     for (uint256 i = startLoop; i < endLoop; i++) { // Appends to _tx
-      txc = txcs[i]; // For readability.
-      require(txc.sender == _shadowTokenOwner);
+      t = txcs[i]; // For readability.
+      require(t.sender == _shadowTokenOwners[t.tokenID]);
       if (i == 0) { // Origin txc — data does not contain prevSig backpointer.
-        data = keccak256(abi.encodePacked(txc.sender, txc.receiver));
+        data = keccak256(abi.encodePacked(t.sender, t.receiver, t.tokenID));
         err = 'invalid signature: origin txc';
       } else { // derivative txc. msg contains backpointer.
         prevSig = _tx[i-1].sig;
         data = keccak256(abi.encodePacked(
-          prevSig.v, prevSig.r, prevSig.s, txc.sender, txc.receiver
+          prevSig.v, prevSig.r, prevSig.s, t.sender, t.receiver, t.tokenID
         ));
         err = 'invalid signature: derivative txc';
       }
       // Validate signature.
-      require(txc.sender == ecrecover(data, txc.sig.v, txc.sig.r, txc.sig.s), err);
-      _shadowTokenOwner = txc.receiver;
-      _tx.push(txc);// Save log of txcs to storage.
+      require(t.sender == ecrecover(data, t.sig.v, t.sig.r, t.sig.s), err);
+      _shadowTokenOwners[t.tokenID] = t.receiver;
+      _tx.push(t);// Save log of txcs to storage.
     }
   }
 
@@ -149,7 +162,19 @@ contract ERC721Escrow {
     _secrets.push(secret);
 
     if (_secrets.length == _participants.length) {
-      _tokenOwner = _shadowTokenOwner;
+      address tokenOwner;
+      address shadowTokenOwner;
+      uint256 id;
+      for (uint256 i = 0; i < _tokenIDs.length; i++) {
+        id = _tokenIDs[i];
+        tokenOwner = _tokenOwners[id];
+        shadowTokenOwner = _shadowTokenOwners[id];
+        if (tokenOwner != shadowTokenOwner) {
+          _balances[shadowTokenOwner]++;
+          _balances[tokenOwner]--;
+          _tokenOwners[id] = shadowTokenOwner;
+        }
+      }
     }
   }
 
