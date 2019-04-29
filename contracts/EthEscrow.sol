@@ -42,35 +42,46 @@ contract EthEscrow {
     bytes32[] memory paths,
     bytes32[] memory hashLocks,
     address[] memory participants
-  ) public payable {
-    require(msg.value > 0);
-    require(paths.length == hashLocks.length);
+  ) public {
+    //require(msg.value > 0, "No Eth sent to constructor for escrow.");
+    require(paths.length == hashLocks.length, "Different number of paths and hashLocks.");
 
     //add check to number of participants / array length??
 
-    _balances[msg.sender] = msg.value;
-    _shadowBalances[msg.sender] = msg.value;
+    _delta = delta;
+    _delay = delay;
 
     for (uint256 i = 0; i < paths.length; i++) {
       _hashLocks[paths[i]] = hashLocks[i];
     }
 
     for (uint256 i = 0; i < participants.length; i++) {
-      _participants[i] = participants[i];
+      _participants.push(participants[i]);
     }
-
-    _startTime = now;
-    _lastTimeOut = now.add(delay).add(delta.mul(participants.length.add(1)));
-    _delta = delta;
-    _delay = delay;
 
   }
 
   modifier txConfirmed() {
+    require(_startTime > 0);
     require(
       _secrets.length == _participants.length || now > _lastTimeOut
     );
     _;
+  }
+
+  modifier txStarted(bool x) {
+    require((_startTime > 0) == x);
+    _;
+  }
+
+  function escrow(uint256 amount) payable txStarted(false) external {
+    require(msg.value > 0);
+
+    _balances[msg.sender] = msg.value;
+    _shadowBalances[msg.sender] = msg.value;
+
+    _startTime = now;
+    _lastTimeOut = calculateTimeOut(_participants.length);
   }
 
   function withdraw() txConfirmed() external {
@@ -80,7 +91,7 @@ contract EthEscrow {
     delete(_balances[msg.sender]);
   }
 
-  function publishTxComponents(TxComponent[] memory txcs) public {
+  function publishTxComponents(TxComponent[] memory txcs) txStarted(true) public {
     bytes32 data;
     string memory err;
     Signature memory prevSig;
@@ -111,7 +122,7 @@ contract EthEscrow {
     }
   }
 
-  function publishSecret(Signature[] memory sigs, bytes32 secret) public {
+  function publishSecret(Signature[] memory sigs, bytes32 secret) txStarted(true) public {
     require(calculateTimeOut(sigs.length) > now);
 
     require(_signatures[secret].length == 0); //require that secret has not already been published.
@@ -149,7 +160,7 @@ contract EthEscrow {
     }
   }
 
-  function calculateTimeOut(uint256 pathLength) private view returns(uint256) {
+  function calculateTimeOut(uint256 pathLength) private view txStarted(true) returns(uint256) {
     return _startTime.add(_delay).add(_delta.mul(pathLength.add(1)));
   }
 

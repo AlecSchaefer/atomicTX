@@ -2,7 +2,7 @@ pragma solidity ^0.5.0;
 pragma experimental ABIEncoderV2;
 
 import "openzeppelin-solidity/contracts/math/SafeMath.sol";
-import "openzeppelin-solidity/contracts/token/ERC20/ERC20.sol";
+import "./tokens/_ERC20.sol";
 
 contract ERC20Escrow {
   using SafeMath for uint256;
@@ -37,14 +37,13 @@ contract ERC20Escrow {
   // Maps hashed paths to hashed secrets (hashLocks).
   mapping(bytes32 => bytes32) public _hashLocks;
 
-  ERC20 public _tokenContract;
+  _ERC20 public _tokenContract;
   uint256 public _amountEscrowed;
 
   constructor(
     uint256 delta,
     uint256 delay,
     address tokenContract,
-    uint256 amountEscrowed,
     bytes32[] memory paths,
     bytes32[] memory hashLocks,
     address[] memory participants
@@ -53,38 +52,49 @@ contract ERC20Escrow {
 
     //add check to number of participants / array length??
 
-    _tokenContract = ERC20(tokenContract);
-    _amountEscrowed = amountEscrowed;
+    _delta = delta;
+    _delay = delay;
 
-    require(
-      _tokenContract.allowance(msg.sender, address(this)) >= amountEscrowed
-    );
-
-    _tokenContract.transferFrom(msg.sender, address(this), amountEscrowed); // Add check to make sure this worked ??
-
-    _balances[msg.sender] = amountEscrowed;
-    _shadowBalances[msg.sender] = amountEscrowed;
+    _tokenContract = _ERC20(tokenContract);
 
     for (uint256 i = 0; i < paths.length; i++) {
       _hashLocks[paths[i]] = hashLocks[i];
     }
 
     for (uint256 i = 0; i < participants.length; i++) {
-      _participants[i] = participants[i];
+      _participants.push(participants[i]);
     }
-
-    _startTime = now;
-    _lastTimeOut = now.add(delay).add(delta.mul(participants.length.add(1)));
-    _delta = delta;
-    _delay = delay;
-
   }
 
   modifier txConfirmed() {
+    require(_startTime > 0);
+    require(_amountEscrowed > 0);
     require(
       _secrets.length == _participants.length || now > _lastTimeOut
     );
     _;
+  }
+
+  modifier txStarted(bool x) {
+    require((_startTime > 0) == x);
+    require((_amountEscrowed > 0) == x);
+    _;
+  }
+
+  function escrow(uint256 amount) txStarted(false) external {
+    require(amount > 0);
+    require(
+      _tokenContract.allowance(msg.sender, address(this)) >= amount,
+      "Escrow contract has insufficient allowance."
+    );
+
+    _amountEscrowed = amount;
+    _tokenContract.transferFrom(msg.sender, address(this), amount); // Add check to make sure this worked ??
+    _balances[msg.sender] = amount;
+    _shadowBalances[msg.sender] = amount;
+
+    _startTime = now;
+    _lastTimeOut = calculateTimeOut(_participants.length);
   }
 
   function withdraw() txConfirmed() external {
@@ -95,7 +105,7 @@ contract ERC20Escrow {
     delete(_balances[msg.sender]);
   }
 
-  function publishTxComponents(TxComponent[] memory txcs) public {
+  function publishTxComponents(TxComponent[] memory txcs) txStarted(true) public {
     bytes32 data;
     string memory err;
     Signature memory prevSig;
@@ -126,7 +136,7 @@ contract ERC20Escrow {
     }
   }
 
-  function publishSecret(Signature[] memory sigs, bytes32 secret) public {
+  function publishSecret(Signature[] memory sigs, bytes32 secret) txStarted(true) public {
     require(calculateTimeOut(sigs.length) > now);
 
     require(_signatures[secret].length == 0); //require that secret has not already been published.
@@ -164,7 +174,9 @@ contract ERC20Escrow {
     }
   }
 
-  function calculateTimeOut(uint256 pathLength) private view returns(uint256) {
+  /*TODO: What if someone publishes more tx TxComponents after all secrets are published?? */
+
+  function calculateTimeOut(uint256 pathLength) private view txStarted(true) returns(uint256) {
     return _startTime.add(_delay).add(_delta.mul(pathLength.add(1)));
   }
 

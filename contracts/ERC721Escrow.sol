@@ -2,7 +2,7 @@ pragma solidity ^0.5.0;
 pragma experimental ABIEncoderV2;
 
 import "openzeppelin-solidity/contracts/math/SafeMath.sol";
-import "openzeppelin-solidity/contracts/token/ERC721/ERC721.sol";
+import "./tokens/_ERC721.sol";
 
 contract ERC721Escrow {
   using SafeMath for uint256;
@@ -46,7 +46,6 @@ contract ERC721Escrow {
     uint256 delta,
     uint256 delay,
     address tokenContract,
-    uint256[] memory tokenIDs,
     bytes32[] memory paths,
     bytes32[] memory hashLocks,
     address[] memory participants
@@ -55,10 +54,42 @@ contract ERC721Escrow {
 
     //add check to number of participants / array length??
 
-    _tokenContract = ERC721(tokenContract);
+    _delta = delta;
+    _delay = delay;
+
+    _tokenContract = _ERC721(tokenContract);
+
+
+    for (uint256 i = 0; i < paths.length; i++) {
+      _hashLocks[paths[i]] = hashLocks[i];
+    }
+
+    for (uint256 i = 0; i < participants.length; i++) {
+      _participants.push(participants[i]);
+    }
+
+  }
+
+  modifier txConfirmed() {
+    require(_startTime > 0);
+    require(
+      _secrets.length == _participants.length || now > _lastTimeOut
+    );
+    _;
+  }
+
+  modifier txStarted(bool x) {
+    require((_startTime > 0) == x);
+    _;
+  }
+
+  function escrow(uint256[] calldata tokenIDs) txStarted(false) external {
 
     for (uint256 i = 0; i < tokenIDs.length; i++) {
-      require(_tokenContract.getApproved(tokenIDs[i]) == address(this));
+      require(
+        _tokenContract.getApproved(tokenIDs[i]) == address(this),
+        "Escrow contract not approved for token."
+      );
       _tokenContract.transferFrom(msg.sender, address(this), tokenIDs[i]);
       _tokenOwners[tokenIDs[i]] = msg.sender;
       _shadowTokenOwners[tokenIDs[i]] = msg.sender;
@@ -66,26 +97,8 @@ contract ERC721Escrow {
       _tokenIDs[i] = tokenIDs[i];
     }
 
-    for (uint256 i = 0; i < paths.length; i++) {
-      _hashLocks[paths[i]] = hashLocks[i];
-    }
-
-    for (uint256 i = 0; i < participants.length; i++) {
-      _participants[i] = participants[i];
-    }
-
     _startTime = now;
-    _lastTimeOut = now.add(delay).add(delta.mul(participants.length.add(1)));
-    _delta = delta;
-    _delay = delay;
-
-  }
-
-  modifier txConfirmed() {
-    require(
-      _secrets.length == _participants.length || now > _lastTimeOut
-    );
-    _;
+    _lastTimeOut = calculateTimeOut(_participants.length);
   }
 
   function withdraw() txConfirmed() external {
@@ -97,16 +110,16 @@ contract ERC721Escrow {
         _tokenContract.transferFrom(address(this), msg.sender, id);
         delete(_tokenOwners[id]);
         delete(_shadowTokenOwners[id]);
-        _balances[msg.sender]--:
+        _balances[msg.sender]--;
         // delete tokenID.
-        _tokenIDs[i] = [_tokenIDs.length - 1];
+        _tokenIDs[i] = _tokenIDs[_tokenIDs.length - 1];
         _tokenIDs.length--;
         i--;
       }
     }
   }
 
-  function publishTxComponents(TxComponent[] memory txcs) public {
+  function publishTxComponents(TxComponent[] memory txcs) txStarted(true) public {
     bytes32 data;
     string memory err;
     Signature memory prevSig;
@@ -133,7 +146,7 @@ contract ERC721Escrow {
     }
   }
 
-  function publishSecret(Signature[] memory sigs, bytes32 secret) public {
+  function publishSecret(Signature[] memory sigs, bytes32 secret) txStarted(true) public {
     require(calculateTimeOut(sigs.length) > now);
 
     require(_signatures[secret].length == 0); //require that secret has not already been published.
@@ -178,7 +191,7 @@ contract ERC721Escrow {
     }
   }
 
-  function calculateTimeOut(uint256 pathLength) private view returns(uint256) {
+  function calculateTimeOut(uint256 pathLength) private view txStarted(true) returns(uint256) {
     return _startTime.add(_delay).add(_delta.mul(pathLength.add(1)));
   }
 
