@@ -1,9 +1,9 @@
 const ERC20 = artifacts.require("_ERC20")
 const ERC721 = artifacts.require("_ERC721")
 
-const EthEscrow = artifacts.require("EthEscrow")
-const ERC20Escrow = artifacts.require("ERC20Escrow")
-const ERC721Escrow = artifacts.require("ERC721Escrow")
+const EthTx = artifacts.require("EthTx")
+const ERC20Tx = artifacts.require("ERC20Tx")
+const ERC721Tx = artifacts.require("ERC721Tx")
 
 const delta = 1 // seconds
 const delay = 1 // seconds
@@ -12,7 +12,7 @@ const hashLocks = []
 
 module.exports = function(deployer, network, accounts) {
   deployer.deploy(
-    EthEscrow,
+    EthTx,
     delta,
     delay,
     paths,
@@ -23,10 +23,10 @@ module.exports = function(deployer, network, accounts) {
     ERC20
   ).then(function () {
     return deployer.deploy(
-      ERC20Escrow,
+      ERC20Tx,
+      ERC20.address,
       delta,
       delay,
-      ERC20.address,
       paths,
       hashLocks,
       accounts
@@ -36,10 +36,10 @@ module.exports = function(deployer, network, accounts) {
     ERC721
   ).then(function () {
     return deployer.deploy(
-      ERC721Escrow,
+      ERC721Tx,
+      ERC721.address,
       delta,
       delay,
-      ERC721.address,
       paths,
       hashLocks,
       accounts

@@ -3,7 +3,7 @@ pragma experimental ABIEncoderV2;
 
 import "openzeppelin-solidity/contracts/math/SafeMath.sol";
 
-contract EthEscrow {
+contract Escrow {
   using SafeMath for uint256;
 
   struct Signature {
@@ -15,7 +15,7 @@ contract EthEscrow {
   struct TxComponent {
     address sender;
     address receiver;
-    uint256 amount;
+    uint256 asset;
     Signature sig;
   }
 
@@ -26,7 +26,7 @@ contract EthEscrow {
 
   address[] public _participants;
   mapping(address => uint256) public _balances;
-  mapping(address => uint256) public _shadowBalances;
+  mapping(address => uint256) public _shadowBalances; // This is different for ERC721
 
   TxComponent[] public _tx;
 
@@ -74,51 +74,29 @@ contract EthEscrow {
     _;
   }
 
-  function escrow(uint256 amount) payable txStarted(false) external {
-    require(msg.value > 0);
-
-    _balances[msg.sender] = msg.value;
-    _shadowBalances[msg.sender] = msg.value;
-
-    _startTime = now;
-    _lastTimeOut = calculateTimeOut(_participants.length);
-  }
-
-  function withdraw() txConfirmed() external {
-    require(_balances[msg.sender] > 0);
-
-    msg.sender.transfer(_balances[msg.sender]);
-    delete(_balances[msg.sender]);
-  }
-
   function publishTxComponents(TxComponent[] memory txcs) txStarted(true) public {
     bytes32 data;
     string memory err;
     Signature memory prevSig;
-    TxComponent memory txc;
+    TxComponent memory t;
     uint256 startLoop = _tx.length;
     uint256 endLoop = startLoop + txcs.length;
     for (uint256 i = startLoop; i < endLoop; i++) { // Appends to _tx
-      txc = txcs[i]; // For readability.
+      t = txcs[i]; // For readability.
       if (i == 0) { // Origin txc — data does not contain prevSig backpointer.
-        data = keccak256(abi.encodePacked(
-          txc.sender, txc.receiver, txc.amount
-        ));
+        data = keccak256(abi.encodePacked(t.sender, t.receiver, t.asset));
         err = 'invalid signature: origin txc';
       } else { // derivative txc. msg contains backpointer.
         prevSig = _tx[i-1].sig;
         data = keccak256(abi.encodePacked(
-          prevSig.v, prevSig.r, prevSig.s, txc.sender, txc.receiver, txc.amount
+          prevSig.v, prevSig.r, prevSig.s, t.sender, t.receiver, t.asset
         ));
         err = 'invalid signature: derivative txc';
       }
       // Validate signature.
-      require(txc.sender == ecrecover(data, txc.sig.v, txc.sig.r, txc.sig.s), err);
-      // Save tentative state. Checks balances are enough to cover each txc (with SafeMath).
-      _shadowBalances[txc.sender] = _shadowBalances[txc.sender].sub(txc.amount);
-      _shadowBalances[txc.receiver] = _shadowBalances[txc.receiver].add(txc.amount);
-      // Save log of txcs to storage.
-      _tx.push(txc);
+      require(t.sender == ecrecover(data, t.sig.v, t.sig.r, t.sig.s), err);
+      shadowTransfer(t.asset, t.sender, t.receiver);
+      _tx.push(t);// Save log of txcs to storage.
     }
   }
 
@@ -150,6 +128,17 @@ contract EthEscrow {
 
     _secrets.push(secret);
 
+    confirmTx();
+  }
+
+  /*TODO: What if someone publishes more tx TxComponents after all secrets are published?? */
+
+  function shadowTransfer(uint256 amount, address sender, address receiver) txStarted(true) internal {
+    _shadowBalances[sender] = _shadowBalances[sender].sub(amount);
+    _shadowBalances[receiver] = _shadowBalances[receiver].add(amount);
+  }
+
+  function confirmTx() internal {
     if (_secrets.length == _participants.length) {
       address a;
       for(uint256 i = 0; i < _participants.length; i++) {
@@ -160,8 +149,24 @@ contract EthEscrow {
     }
   }
 
-  function calculateTimeOut(uint256 pathLength) private view txStarted(true) returns(uint256) {
+  function calculateTimeOut(uint256 pathLength) internal view txStarted(true) returns(uint256) {
     return _startTime.add(_delay).add(_delta.mul(pathLength.add(1)));
   }
+
+  function startTx() txStarted(false) internal {
+    _startTime = now;
+    _lastTimeOut = calculateTimeOut(_participants.length);
+  }
+
+  function escrow(uint256 amount, address owner) internal txStarted(false) {
+    require(amount > 0);
+
+    _balances[owner] = amount;
+    _shadowBalances[owner] = amount;
+
+    startTx();
+  }
+
+  function withdraw() external;
 
 }
